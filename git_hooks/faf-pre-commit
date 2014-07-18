@@ -1,0 +1,46 @@
+#!/bin/sh
+#
+# pre-commit hook to be used by faf contributors to check their commits
+# for
+# - whitespace errors
+# - pep8 compliance
+# - string quoting style
+#
+# save as faf/.git/hooks/pre-commit
+#
+# requires pep8 tool
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+    against=HEAD
+else
+    # Initial commit: diff against an empty tree object
+    against=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+files_modified=`git diff-index --name-only HEAD`
+
+for f in $files_modified; do
+    if [[ $f == *.py ]]; then
+        pep8 $f
+        if [ $? != 0 ]; then
+            echo "Code fails style check."
+            exit 1
+        fi
+    fi
+done
+
+for f in $files_modified; do
+    if [[ $f == *.py ]]; then
+        git grep -e "':" -e "= '" -e "('" $f
+        if [ $? == 0 ]; then
+            echo "Commit contains single quotes."
+            exit 1
+        fi
+    fi
+done
+
+exit 0
