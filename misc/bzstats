@@ -1,0 +1,134 @@
+#!/usr/bin/python
+import sys
+import getpass
+import collections
+import bugzilla
+
+def download_data(login, password, product, version, components=None):
+    bz = bugzilla.Bugzilla(url="https://bugzilla.redhat.com/xmlrpc.cgi")
+    bz.login(login, password)
+
+
+    q = bz.build_query(product=product,
+                       version=version,
+                       component=components)
+    limit = 1000
+    offset = 0
+    result = list()
+    while True:
+        q.update({"limit":limit, "offset":offset})
+        print "offset :", offset
+        print q
+        bug_list = bz.query(q)
+        for b in bug_list:
+            result.append((b.status, b.resolution, b.status_whiteboard, b.summary.encode("utf8")))
+
+        if len(bug_list) != limit:
+            break
+        offset += limit
+    return result
+
+
+def parse_file(filein):
+    parsed_data = list()
+    l = 0
+    for ln in raw_data_file:
+        item = ln.strip().split("@?@")
+        l += 1
+        if len(item) < 4:
+            print "Invalid line ", l
+            sys.exit(1)
+        parsed_data.append(item)
+    return parsed_data
+
+
+def work_out_summary(data, total, totalabrt):
+    result = list()
+    for key, value in data.iteritems():
+        st, sa = value
+        d = (key, 100*float(st)/total, st, sa, 100*float(sa)/totalabrt, 100*float(sa)/st)
+        result.append(d)
+    return result
+
+
+def print_stat_line(stat_tuple, width, padding=""):
+    print "{0}{1}{2}{3:-5} {4:-10.1f}%  {5:-9.1f}% {7:-12}  {6:-14.1f}%".format(padding,
+            stat_tuple[0], " " * (width - len(padding) - len(stat_tuple[0])), stat_tuple[2], stat_tuple[1], stat_tuple[5], stat_tuple[4], stat_tuple[3])
+
+
+def bug_reported_by_abrt(whiteboard, summary):
+    return "abrt_hash" in whiteboard or "[abrt]" in summary
+
+
+if len(sys.argv) > 1:
+    # $ bugzilla --user=jfilak@redhat.com query -p "Fedora" -v 21 --outputformat="%{status}@?@%{resolution}@?@%{status_whiteboard}@?@%{summary}'" > fedora21.bugstat
+    # $ bzstats file fedora21.bugstat
+    if sys.argv[1] == "query":
+        password = getpass.getpass("Password:")
+        product = sys.argv[3]
+        version = sys.argv[4]
+        components = None
+        if len(sys.argv) > 5:
+            components = sys.argv[5].split(",")
+            if len(components) == 1:
+                file_name = components[0]
+                components = None
+                with open(file_name, 'r') as components_file:
+                    components = list()
+                    for line in components_file:
+                        components.append(line.rstrip("\n"))
+        raw_data = download_data(sys.argv[2], password, product, version, components)
+        i = 3
+        while i < len(sys.argv):
+            sys.argv[i] = sys.argv[i].replace(" ", "_").replace(".", "_").replace(",", "_")
+            i += 1
+        file_name = "{0}.bugstat".format("_".join(sys.argv[3:]))
+        print "Saving Bugzilla response in file : ", file_name
+        with open(file_name, "w") as raw_data_file:
+            for item in raw_data:
+                raw_data_file.write("{0}\n".format("@?@".join(item)))
+    elif sys.argv[1] == "file":
+        print "Reading from file :", sys.argv[2]
+        with open(sys.argv[2], "r") as raw_data_file:
+            raw_data = parse_file(raw_data_file)
+    else:
+        print "Invalid action :", sys.argv[1]
+        print "You can use 'query' or 'file' or None to read from stdin"
+        sys.exit(1)
+else:
+    raw_data = parse_file(sys.stdin)
+
+
+totalabrtbugs = 0
+stats = collections.defaultdict(lambda : (0, 0))
+substats = collections.defaultdict(lambda : collections.defaultdict(lambda : (0, 0)))
+for status, resolution, whiteboard, summary in raw_data:
+    t, a = stats[status]
+    t += 1
+    byabrt = int(bug_reported_by_abrt(whiteboard, summary))
+    totalabrtbugs += byabrt
+    a += byabrt
+    stats[status] = (t, a)
+
+    if resolution:
+        st, sa = substats[status][resolution]
+        st += 1
+        sa += byabrt
+        substats[status][resolution] = (st, sa)
+
+total = work_out_summary(stats, len(raw_data), totalabrtbugs)
+subtotal = dict()
+for key in substats.iterkeys():
+    st, sa = stats[key]
+    subtotal[key] = work_out_summary(substats[key], st, sa)
+
+width = 2 + max([max((len(item[0]) for item in total)), 2 + max((max((len(item[0]) for item in value)) for value in subtotal.itervalues()))])
+
+print "Status{0}Count  Percentage  ABRT Ratio   ABRT Count  ABRT Percentage".format(" "*(width - len("Status")))
+for item in total:
+    print_stat_line(item, width)
+    if item[0] in subtotal:
+        for subitem in subtotal[item[0]]:
+            print_stat_line(subitem, width, padding="  ")
+
+print "{0}{1:-5}                   {3:4.1f}%        {2:-5} ".format(" "*width, len(raw_data), totalabrtbugs, 100*float(totalabrtbugs)/len(raw_data))
